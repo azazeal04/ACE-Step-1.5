@@ -2003,7 +2003,7 @@ def navigate_to_previous_batch(current_batch_index, batch_queue):
     for idx in range(8):
         if idx < len(real_audio_paths):
             audio_path = real_audio_paths[idx].replace("\\", "/")  # Normalize path
-            # Pass path directly to Audio component
+            # Pass path directly; Gradio Audio component with type="filepath" expects a string path
             audio_updates.append(gr.update(value=audio_path))
         else:
             audio_updates.append(gr.update(value=None))
@@ -2127,7 +2127,7 @@ def navigate_to_next_batch(autogen_enabled, current_batch_index, total_batches, 
     for idx in range(8):
         if idx < len(real_audio_paths):
             audio_path = real_audio_paths[idx].replace("\\", "/")  # Normalize path
-            # Pass path directly to Audio component
+            # Pass path directly; Gradio Audio component with type="filepath" expects a string path
             audio_updates.append(gr.update(value=audio_path))
         else:
             audio_updates.append(gr.update(value=None))

@@ -99,7 +99,8 @@ class AceStepHandler:
         self._load_progress_estimates()
         self.last_init_params = None
         
-        # Quantization state (set during initialize_service)
+        # Quantization state - tracks if model is quantized (int8_weight_only, fp8_weight_only, or w8a8_dynamic)
+        # Populated during initialize_service, remains None if quantization is disabled
         self.quantization = None
         
         # LoRA state
@@ -177,7 +178,7 @@ class AceStepHandler:
             return (
                 f"❌ LoRA loading is not supported on quantized models. "
                 f"Current quantization: {self.quantization}. "
-                "Please re-initialize the service with quantization disabled (set 'INT8 Quantization' to 'None' in the UI), then try loading the LoRA adapter again."
+                "Please re-initialize the service with quantization disabled (set quantization to 'None' in the UI), then try loading the LoRA adapter again."
             )
         
         if not lora_path or not lora_path.strip():

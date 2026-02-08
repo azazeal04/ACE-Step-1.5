@@ -246,6 +246,9 @@ class AceStepHandler:
                 if use_lora:
                     self.model.decoder.enable_adapter_layers()
                     logger.info("LoRA adapter enabled")
+                    # Apply current scale when enabling LoRA
+                    if self.lora_scale != 1.0:
+                        self.set_lora_scale(self.lora_scale)
                 else:
                     self.model.decoder.disable_adapter_layers()
                     logger.info("LoRA adapter disabled")
@@ -270,10 +273,18 @@ class AceStepHandler:
         # Clamp scale to 0-1 range
         self.lora_scale = max(0.0, min(1.0, scale))
         
-        # Iterate through all LoRA layers and set their scaling
+        # Only apply scaling if LoRA is enabled
+        if not self.use_lora:
+            logger.info(f"LoRA scale set to {self.lora_scale:.2f} (will apply when LoRA is enabled)")
+            return f"✅ LoRA scale: {self.lora_scale:.2f} (LoRA disabled)"
+        
+        # Iterate through LoRA layers only and set their scaling
         try:
+            modified_count = 0
             for name, module in self.model.decoder.named_modules():
-                if hasattr(module, 'scaling'):
+                # Only modify LoRA modules - they have 'lora_' in their name
+                # This prevents modifying attention scaling and other non-LoRA modules
+                if 'lora_' in name and hasattr(module, 'scaling'):
                     scaling = module.scaling
                     # Handle dict-style scaling (adapter_name -> value)
                     if isinstance(scaling, dict):
@@ -283,14 +294,20 @@ class AceStepHandler:
                         # Apply new scale
                         for adapter_name in scaling:
                             module.scaling[adapter_name] = module._original_scaling[adapter_name] * self.lora_scale
+                        modified_count += 1
                     # Handle float-style scaling (single value)
                     elif isinstance(scaling, (int, float)):
                         if not hasattr(module, '_original_scaling'):
                             module._original_scaling = scaling
                         module.scaling = module._original_scaling * self.lora_scale
+                        modified_count += 1
             
-            logger.info(f"LoRA scale set to {self.lora_scale:.2f}")
-            return f"✅ LoRA scale: {self.lora_scale:.2f}"
+            if modified_count > 0:
+                logger.info(f"LoRA scale set to {self.lora_scale:.2f} (modified {modified_count} modules)")
+                return f"✅ LoRA scale: {self.lora_scale:.2f}"
+            else:
+                logger.warning("No LoRA scaling attributes found to modify")
+                return f"⚠️ Scale set to {self.lora_scale:.2f} (no modules found)"
         except Exception as e:
             logger.warning(f"Could not set LoRA scale: {e}")
             return f"⚠️ Scale set to {self.lora_scale:.2f} (partial)"

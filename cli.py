@@ -242,7 +242,7 @@ def _extract_caption_lyrics_from_formatted_prompt(formatted_prompt: str) -> Tupl
     lyrics = matches[-1].group(2)
 
     # Trim lyrics if chat-template markers appear after the user message.
-    cut_markers = ["<|eot_id|>", "<|start_header_id|>", "<|assistant|>", "<|user|>", "<|system|>"]
+    cut_markers = ["<|eot_id|>", "<|start_header_id|>", "<|assistant|>", "<|user|>", "<|system|>", "<|im_end|>", "<|im_start|>"]
     cut_at = len(lyrics)
     for marker in cut_markers:
         pos = lyrics.find(marker)
@@ -263,21 +263,36 @@ def _extract_instruction_from_formatted_prompt(formatted_prompt: str) -> Optiona
 
 
 def _extract_cot_metadata_from_formatted_prompt(formatted_prompt: str) -> dict:
-    """Best-effort extraction of COT metadata from a formatted prompt string."""
+    """Best-effort extraction of COT metadata from a formatted prompt string,
+    supporting multi-line values.
+    """
     matches = list(re.finditer(r"<think>\n(.*?)\n</think>", formatted_prompt, re.DOTALL))
     if not matches:
         return {}
     block = matches[-1].group(1)
     metadata = {}
+    current_key = None
+    current_value_lines = []
+
     for line in block.splitlines():
         line = line.strip()
-        if not line or ":" not in line:
+        if not line:
             continue
-        key, value = line.split(":", 1)
-        key = key.strip().lower()
-        value = value.strip()
-        if key:
-            metadata[key] = value
+
+        key_match = re.match(r"^(\w+):\s*(.*)", line)
+        if key_match:
+            if current_key:
+                metadata[current_key] = " ".join(current_value_lines).strip()
+
+            current_key = key_match.group(1).strip().lower()
+            current_value_lines = [key_match.group(2).strip()]
+        else:
+            if current_key:
+                current_value_lines.append(line)
+
+    if current_key and current_value_lines:
+        metadata[current_key] = " ".join(current_value_lines).strip()
+
     return metadata
 
 
@@ -1721,6 +1736,14 @@ def main():
                         user_metadata["duration"] = int(duration_value)
                 except (ValueError, TypeError):
                     pass
+            # Only include caption and language in user_metadata on
+            # regeneration attempts.  On the first attempt the LM should
+            # generate/expand these via CoT (matching inference.py behaviour).
+            if attempt > 0:
+                if params.caption and params.caption.strip():
+                    user_metadata["caption"] = params.caption.strip()
+                if params.vocal_language and params.vocal_language not in ("", "unknown"):
+                    user_metadata["language"] = params.vocal_language
             user_metadata_to_pass = user_metadata if user_metadata else None
 
             lm_result = llm_handler.generate_with_stop_condition(
@@ -1825,17 +1848,29 @@ def main():
                         params.timesignature = parsed_timesignature
                     if language_changed:
                         params.vocal_language = parsed_language
+                    # Carry forward the expanded caption so the second
+                    # attempt's <think> block (and user_metadata) use it
+                    # instead of the short original caption.
+                    edited_caption_for_regen = edited_metas.get("caption") if edited_metas else None
+                    if edited_caption_for_regen and edited_caption_for_regen.strip():
+                        params.caption = edited_caption_for_regen
                     print("INFO: Edited metadata detected. Regenerating audio codes with updated values.")
                     llm_handler._skip_prompt_edit = True
                     continue
             break
 
-        if edited_caption:
+        edited_meta_caption = edited_metas.get("caption") if edited_metas else None
+        if edited_meta_caption and edited_meta_caption.strip():
+            params.caption = edited_meta_caption
+        elif edited_caption:
             params.caption = edited_caption
         elif params.use_cot_caption and lm_metadata.get("caption"):
             params.caption = lm_metadata.get("caption")
+
         if edited_lyrics:
             params.lyrics = edited_lyrics
+        elif not params.lyrics and lm_metadata.get("lyrics"):
+            params.lyrics = lm_metadata.get("lyrics")
 
         if edited_instruction:
             params.instruction = edited_instruction
@@ -1877,6 +1912,32 @@ def main():
                 language_value = lm_metadata.get("vocal_language") or lm_metadata.get("language")
                 if language_value:
                     params.vocal_language = language_value
+
+        # use_cot_language: override vocal_language with LM detection unless
+        # the user explicitly edited the language in the think block.
+        if params.use_cot_language:
+            edited_lang = (edited_metas.get("language") or edited_metas.get("vocal_language")) if edited_metas else None
+            if not edited_lang:
+                lm_lang = lm_metadata.get("vocal_language") or lm_metadata.get("language")
+                if lm_lang:
+                    params.vocal_language = lm_lang
+
+        # Populate cot_* fields for downstream reporting (mirrors inference.py)
+        if lm_metadata:
+            if original_bpm is None:
+                params.cot_bpm = params.bpm
+            if not original_keyscale:
+                params.cot_keyscale = params.keyscale
+            if not original_timesignature:
+                params.cot_timesignature = params.timesignature
+            if original_target_duration is None or float(original_target_duration) <= 0:
+                params.cot_duration = params.duration
+            if original_vocal_language in (None, "", "unknown"):
+                params.cot_vocal_language = params.vocal_language
+            if not params.caption:
+                params.cot_caption = lm_metadata.get("caption", "")
+            if not params.lyrics:
+                params.cot_lyrics = lm_metadata.get("lyrics", "")
 
         params.thinking = False
         params.use_cot_caption = False

@@ -124,9 +124,9 @@ class ModelRunner:
         if self.world_size > 1:
             if rank == 0:
                 self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
-                dist.barrier()
+                dist_utils.barrier()
             else:
-                dist.barrier()
+                dist_utils.barrier()
                 self.shm = SharedMemory(name="nanovllm")
                 self.loop()
 

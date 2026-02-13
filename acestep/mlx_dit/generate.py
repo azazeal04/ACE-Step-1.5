@@ -84,6 +84,7 @@ def mlx_generate_diffusion(
     audio_cover_strength: float = 1.0,
     encoder_hidden_states_non_cover_np: Optional[np.ndarray] = None,
     context_latents_non_cover_np: Optional[np.ndarray] = None,
+    compile_model: bool = False,
 ) -> Dict[str, object]:
     """Run the complete MLX diffusion loop.
 
@@ -103,6 +104,10 @@ def mlx_generate_diffusion(
         audio_cover_strength: cover strength (0-1).
         encoder_hidden_states_non_cover_np: optional [B, enc_L, D] for non-cover.
         context_latents_non_cover_np: optional [B, T, C] for non-cover.
+        compile_model: If True, compile the decoder step with ``mx.compile``
+            for kernel fusion. Cross-attention KV caching is disabled under
+            compilation; the fused kernels typically offset this cost.
+            Falls back to uncompiled path on failure.
 
     Returns:
         Dict with ``"target_latents"`` (numpy) and ``"time_costs"`` dict.
@@ -146,8 +151,30 @@ def mlx_generate_diffusion(
 
     cover_steps = int(num_steps * audio_cover_strength)
 
-    # ---- Diffusion loop ----
-    cache = MLXCrossAttentionCache()
+    # ---- Prepare decoder step (compiled or plain with KV cache) ----
+    # When compiled, we wrap the decoder call in mx.compile for kernel fusion.
+    # Cross-attention KV caching is incompatible with mx.compile graph tracing
+    # (cache uses Python dicts with dynamic branching), so it is disabled.
+    # The kernel fusion from compilation typically offsets this cost.
+    _compiled_step = None
+    if compile_model:
+        def _raw_step(xt, t, tr, enc, ctx):
+            vt, _ = mlx_decoder(
+                hidden_states=xt, timestep=t, timestep_r=tr,
+                encoder_hidden_states=enc, context_latents=ctx,
+                cache=None, use_cache=False,
+            )
+            return vt
+
+        try:
+            _compiled_step = mx.compile(_raw_step)
+            logger.info("[MLX-DiT] Diffusion step compiled with mx.compile().")
+        except Exception as exc:
+            logger.warning(
+                "[MLX-DiT] mx.compile() failed (%s); using uncompiled path.", exc
+            )
+
+    cache = MLXCrossAttentionCache() if _compiled_step is None else None
     xt = noise
 
     diff_start = time.time()
@@ -160,17 +187,21 @@ def mlx_generate_diffusion(
         if step_idx >= cover_steps and enc_hs_nc is not None:
             enc_hs = enc_hs_nc
             ctx = ctx_nc
-            cache = MLXCrossAttentionCache()
+            if cache is not None:
+                cache = MLXCrossAttentionCache()
 
-        vt, cache = mlx_decoder(
-            hidden_states=xt,
-            timestep=t_curr,
-            timestep_r=t_curr,
-            encoder_hidden_states=enc_hs,
-            context_latents=ctx,
-            cache=cache,
-            use_cache=True,
-        )
+        if _compiled_step is not None:
+            vt = _compiled_step(xt, t_curr, t_curr, enc_hs, ctx)
+        else:
+            vt, cache = mlx_decoder(
+                hidden_states=xt,
+                timestep=t_curr,
+                timestep_r=t_curr,
+                encoder_hidden_states=enc_hs,
+                context_latents=ctx,
+                cache=cache,
+                use_cache=True,
+            )
 
         # Evaluate to ensure computation is complete before next step
         mx.eval(vt)

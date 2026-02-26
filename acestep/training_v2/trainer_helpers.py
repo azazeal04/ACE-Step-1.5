@@ -427,9 +427,15 @@ def _resume_lokr(
         yield TrainingUpdate(0, 0.0, "[OK] LoKR weights loaded (no training state)", kind="info")
         return None
 
-    epoch, step, _ = training_state
-    yield TrainingUpdate(0, 0.0, f"[OK] Resumed LoKR from epoch {epoch}, step {step}", kind="info")
-    return (epoch, step)
+    # Full mode resume: no full decoder checkpoint found.
+    if getattr(trainer.training_config, "training_mode", "adapter") == "full":
+        yield TrainingUpdate(
+            0,
+            0.0,
+            f"[WARN] full_decoder_state.pt not found in {ckpt_dir}",
+            kind="warn",
+        )
+        return
 
 
 def _resume_lora(

@@ -2,23 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, TypedDict
+from typing import Dict, List
 
 import torch
 
 
-class PreprocessedBatch(TypedDict):
-    """Typed structure returned by ``collate_preprocessed_batch``."""
-
-    target_latents: torch.Tensor
-    attention_mask: torch.Tensor
-    encoder_hidden_states: torch.Tensor
-    encoder_attention_mask: torch.Tensor
-    context_latents: torch.Tensor
-    metadata: List[Dict[str, Any]]
-
-
-def collate_preprocessed_batch(batch: List[Dict[str, Any]]) -> PreprocessedBatch:
+def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     """Pad and stack variable-length preprocessed training tensors.
 
     Args:

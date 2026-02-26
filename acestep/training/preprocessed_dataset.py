@@ -55,7 +55,7 @@ class PreprocessedTensorDataset(Dataset):
         self.valid_paths = [p for p in self.sample_paths if os.path.exists(p)]
         if len(self.valid_paths) != len(self.sample_paths):
             logger.warning(
-                "Some tensor files not found: {} missing",
+                "Some tensor files not found: %d missing",
                 len(self.sample_paths) - len(self.valid_paths),
             )
 
@@ -65,10 +65,10 @@ class PreprocessedTensorDataset(Dataset):
                 sample = torch.load(vp, map_location="cpu", weights_only=True)
                 self.latent_lengths.append(int(sample["target_latents"].shape[0]))
             except (FileNotFoundError, PermissionError, EOFError, OSError, KeyError, RuntimeError) as exc:
-                logger.warning("Failed to read latent length from {}: {}", vp, exc)
+                logger.warning("Failed to read latent length from %s: %s", vp, exc)
                 self.latent_lengths.append(0)
 
-        logger.info("PreprocessedTensorDataset: {} samples from {}", len(self.valid_paths), self.tensor_dir)
+        logger.info("PreprocessedTensorDataset: %d samples from %s", len(self.valid_paths), self.tensor_dir)
 
     def _resolve_manifest_path(self, raw: str) -> Optional[str]:
         """Resolve and validate manifest sample path."""
@@ -82,18 +82,18 @@ class PreprocessedTensorDataset(Dataset):
         try:
             candidate = safe_path(raw)
             if os.path.exists(candidate):
-                logger.debug("Resolved legacy manifest path via safe root: {}", raw)
+                logger.debug("Resolved legacy manifest path via safe root: %s", raw)
                 return candidate
         except ValueError:
             pass
 
-        logger.warning("Skipping unresolvable manifest path: {}", raw)
+        logger.warning("Skipping unresolvable manifest path: %s", raw)
         return None
 
     def __len__(self) -> int:
         return len(self.valid_paths)
 
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Load one preprocessed sample."""
         if self.cache_policy == "ram_lru" and idx in self._cache:
             data = self._cache.pop(idx)

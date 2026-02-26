@@ -30,14 +30,11 @@ Benefits:
 Backward compatibility:
 - Keep existing `.pt`-per-sample format as default for compatibility.
 - Add `--dataset-format {pt,v3_sharded}` and auto-detect in loader.
-- Provide `convert-dataset` migration tooling with progress/error reporting and integrity verification (checksums + sample counts).
-- Document when migration is worthwhile (large, frequently reused datasets) vs when retaining `.pt` is acceptable.
 
 ## A2. Add duration/latent-length bucketing in dataloader
 - Precompute latent length in manifest/index.
 - Build bucketed batches (near-equal lengths) to reduce padding waste.
 - Keep deterministic shuffling by bucket + epoch seed.
-- Validate bucketing does not create ordering bias by running epoch-level bucket-aware shuffle checks and by comparing train/val curves with and without bucketing.
 
 Expected gain:
 - Better GPU utilization and lower wasted FLOPs for variable-length audio.
@@ -64,7 +61,6 @@ New CLI check command before training:
 - Verifies tensor shapes/dtypes/masks.
 - Checks for NaNs/infs.
 - Reports padding efficiency estimate and bucket distribution.
-- Executes bucket-aware shuffle validation and with/without-bucketing metric comparisons as a QA checklist item.
 
 ---
 
@@ -95,15 +91,14 @@ Provide explicit parameter groups:
 - Optional FSDP/ZeRO integration behind explicit flag.
 
 ## B4. Checkpointing and resume semantics for full FT
-- Save full model state (or sharded states) + optimizer + scheduler + scaler, including `checkpoint_version` metadata.
+- Save full model state (or sharded states) + optimizer + scheduler + scaler.
 - Add periodic EMA checkpoint option for stability.
-- Validate `checkpoint_version` on resume and route incompatible versions to upgrade handlers with clear errors.
+- Add strict compatibility validation on resume.
 
 ## B5. Safety controls
 - Require explicit opt-in (`--training-mode full --i-understand-vram-risk`).
-- Preflight VRAM estimator for model variant + seq length + batch size using a hybrid method: analytical estimate + optional dry-run profiling.
-- Account for runtime overhead, optimizer/AMP states, and gradient accumulation; report confidence bounds and error margin.
-- Auto-suggest fallback to LoRA when estimate exceeds threshold, and require extra confirmation when estimator confidence is low.
+- Preflight VRAM estimator for model variant + seq length + batch size.
+- Auto-suggest fallback to LoRA when estimate exceeds threshold.
 
 ## B6. Evaluation and regression hooks
 - Add minimal validation hooks (loss-only + optional sample generation every N epochs).
@@ -117,45 +112,40 @@ Provide explicit parameter groups:
 1. Add packed dataset writer + loader (behind flags).
 2. Add bucketed sampler.
 3. Add preprocessing QA validator.
-4. Add migration command `convert-dataset --dataset-format {pt,v3_sharded}` with checksums/sample-count verification.
-5. Testing: `PackedDatasetWriterTests`, `BucketedSamplerTests`, `QAValidatorTests`, plus backward-compat tests (`pt` vs `v3_sharded`).
 
 ### Phase 2: Runtime pipeline polish
 1. Add mmap/LRU cache policy.
 2. Add optional device prefetch.
 3. Benchmark and publish defaults by GPU class.
-4. Testing: `CachePolicyTests`, `DevicePrefetchIntegration`, and performance regression benchmarks against fixed baselines per GPU class.
 
 ### Phase 3: Full fine-tuning MVP
 1. Add `training_mode=full` with decoder-only unfreeze.
 2. Add parameter groups + LR multipliers.
 3. Add full-state checkpoint/resume.
-4. Testing: `TrainingModeFullTests`, `ParamGroupTests`, `CheckpointResumeTests`, plus end-to-end one-epoch integration.
 
 ### Phase 4: Advanced scaling
 1. Add distributed/sharded optimizer options.
 2. Add staged unfreeze profiles.
 3. Add stronger eval/early-stop controls.
-4. Testing: `DistributedOptimizerTests`, `StagedUnfreezeTests`, `EarlyStopIntegration`; wire all phases into CI with reproducible fixtures and clear thresholds.
 
 ---
 
 ## 5) Acceptance criteria (measurable)
 
 For LoRA pipeline improvements:
-- >=20% faster step time on medium dataset vs current `.pt` baseline, measured as median step time over 200 measured steps after 50 warmup steps, fixed seed and fixed dataset shard.
-- >=15% reduction in data-loader stall time, measured via PyTorch profiler as `data_wait_time / total_step_time` over the same measurement window.
-- No regression in final training loss curve over fixed-seed smoke runs with and without bucketing.
+- >=20% faster step time on medium dataset vs current `.pt` baseline.
+- >=15% reduction in data-loader stall time.
+- No regression in final training loss curve over fixed seed smoke run.
 
 For full fine-tuning MVP:
-- Successfully trains decoder-only full FT for one epoch on supported GPU setups (>=24 GB VRAM; e.g., RTX 3090/A5000/A100; fixed CUDA/cuDNN matrix documented in test logs) using fixed seed, fixed subset, and fixed batch size.
-- Resume from checkpoint reproduces optimizer/scheduler state correctly, including `checkpoint_version` compatibility checks.
-- CLI safety checks prevent accidental OOM-prone config starts, validated with explicit stress cases (oversized batch, long sequence, high accumulation) and expected warn/fail responses.
+- Successfully trains decoder-only full FT for at least one epoch on supported GPU setup.
+- Resume from checkpoint reproduces optimizer/scheduler state correctly.
+- CLI safety checks prevent accidental OOM-prone config starts.
 
 ---
 
 ## 6) Immediate next patch candidates
-1. Implement `DatasetBackend` abstraction with a sharded backend implementation.
-2. Introduce `BucketedBatchSampler` keyed by latent length.
-3. Extend `train.py` with a `validate-dataset --dataset-dir ...` command.
-4. Add a `training_mode` enum and a `full` branch in config/trainer that enables decoder-only unfreeze.
+1. Add `DatasetBackend` abstraction and a sharded backend implementation.
+2. Add `BucketedBatchSampler` keyed by latent length.
+3. Add `train.py validate-dataset --dataset-dir ...` command.
+4. Add `training_mode` enum + `full` branch in config/trainer with decoder-only unfreeze.

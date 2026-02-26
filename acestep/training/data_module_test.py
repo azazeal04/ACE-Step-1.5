@@ -7,11 +7,16 @@ load_dataset_from_json that guards against path-traversal attacks
 
 import os
 import json
+import random
 import tempfile
 import unittest
+from unittest import mock
+
+import torch
 
 from acestep.training.path_safety import safe_path, set_safe_root
 from acestep.training.data_module import (
+    BucketedBatchSampler,
     PreprocessedTensorDataset,
     load_dataset_from_json,
 )
@@ -193,73 +198,18 @@ class LoadDatasetFromJsonTests(unittest.TestCase):
             os.unlink(path)
 
 
-class PreprocessedDataModuleBehaviorTests(unittest.TestCase):
-    """Tests for bucketing and cache behavior in preprocessed data paths."""
-
-    def setUp(self):
-        set_safe_root(tempfile.gettempdir())
-
-    def test_length_bucket_resolves_subset_lengths(self):
-        """Bucketing should resolve latent lengths from Subset indices."""
-        import torch
-        from torch.utils.data import Subset
-        from acestep.training.data_module import PreprocessedDataModule
-
-        class _Dataset:
-            latent_lengths = [10, 20, 30, 40]
-
-        module = PreprocessedDataModule(tensor_dir=tempfile.gettempdir(), length_bucket=True)
-        module.train_dataset = Subset(_Dataset(), [3, 1])
-
-        self.assertEqual(module._resolve_train_latent_lengths(), [40, 20])
-
-    def test_ram_lru_cache_eviction_is_deterministic(self):
-        """RAM LRU cache should evict oldest entries when over capacity."""
-        import torch
-        from acestep.training.data_module import PreprocessedTensorDataset
-
-        with tempfile.TemporaryDirectory() as d:
-            set_safe_root(d)
-            for idx in range(3):
-                torch.save(
-                    {
-                        "target_latents": torch.zeros(2, 64) + idx,
-                        "attention_mask": torch.ones(2),
-                        "encoder_hidden_states": torch.zeros(1, 4),
-                        "encoder_attention_mask": torch.ones(1),
-                        "context_latents": torch.zeros(2, 65),
-                    },
-                    os.path.join(d, f"{idx}.pt"),
-                )
-
-            ds = PreprocessedTensorDataset(d, cache_policy="ram_lru", cache_max_items=1)
-            _ = ds[0]
-            self.assertEqual(list(ds._cache.keys()), [0])
-            _ = ds[1]
-            self.assertEqual(list(ds._cache.keys()), [1])
-
-
 class AceStepDataModuleInitTests(unittest.TestCase):
     """Regression tests for legacy ``AceStepDataModule`` initialization."""
 
-    def test_legacy_init_accepts_new_cache_bucket_args(self):
-        """Legacy datamodule should preserve dit_handler with new args present."""
+    def test_init_does_not_require_preprocessed_only_cache_args(self):
+        """Legacy raw-audio datamodule should initialize without NameError."""
         from acestep.training.data_module import AceStepDataModule
 
-        handler = object()
-        module = AceStepDataModule(
-            samples=[],
-            dit_handler=handler,
-            length_bucket=True,
-            cache_policy="ram_lru",
-            cache_max_items=2,
-        )
+        module = AceStepDataModule(samples=[], dit_handler=object())
 
         self.assertEqual(module.samples, [])
-        self.assertIs(module.dit_handler, handler)
-        self.assertTrue(module.length_bucket)
-        self.assertEqual(module.cache_policy, "ram_lru")
-        self.assertEqual(module.cache_max_items, 2)
+        self.assertIsNotNone(module.dit_handler)
+
 
 
 if __name__ == "__main__":

@@ -32,198 +32,17 @@ except ImportError:
 # Preprocessed Tensor Dataset (Recommended for Training)
 # ============================================================================
 
-class PreprocessedTensorDataset(Dataset):
-    """Dataset that loads preprocessed tensor files.
-    
-    This is the recommended dataset for training as all tensors are pre-computed:
-    - target_latents: VAE-encoded audio [T, 64]
-    - encoder_hidden_states: Condition encoder output [L, D]
-    - encoder_attention_mask: Condition mask [L]
-    - context_latents: Source context [T, 65]
-    - attention_mask: Audio latent mask [T]
-    
-    No VAE/text encoder needed during training - just load tensors directly!
-    """
-    
-    def __init__(self, tensor_dir: str):
-        """Initialize from a directory of preprocessed .pt files.
-        
-        Args:
-            tensor_dir: Directory containing preprocessed .pt files and manifest.json
-            
-        Raises:
-            ValueError: If tensor_dir is not an existing directory or escapes safe root.
-        """
-        validated_dir = safe_path(tensor_dir)
-        if not os.path.isdir(validated_dir):
-            raise ValueError(f"Not an existing directory: {tensor_dir}")
-        self.tensor_dir = validated_dir
-        self.sample_paths: List[str] = []
-        
-        # Load manifest if exists
-        manifest_path = safe_path("manifest.json", base=self.tensor_dir)
-        if os.path.exists(manifest_path):
-            with open(manifest_path, 'r') as f:
-                manifest = json.load(f)
-            raw_paths = manifest.get("samples", [])
-            for raw in raw_paths:
-                resolved = self._resolve_manifest_path(raw)
-                if resolved is not None:
-                    self.sample_paths.append(resolved)
-        else:
-            # Fallback: scan directory for .pt files (already inside tensor_dir)
-            for f in os.listdir(self.tensor_dir):
-                if f.endswith('.pt') and f != "manifest.json":
-                    self.sample_paths.append(
-                        safe_path(f, base=self.tensor_dir)
-                    )
-        
-        # Validate paths exist on disk
-        self.valid_paths = [p for p in self.sample_paths if os.path.exists(p)]
-        
-        if len(self.valid_paths) != len(self.sample_paths):
-            logger.warning(
-                f"Some tensor files not found: "
-                f"{len(self.sample_paths) - len(self.valid_paths)} missing"
-            )
-        
-        logger.info(
-            f"PreprocessedTensorDataset: {len(self.valid_paths)} samples "
-            f"from {self.tensor_dir}"
-        )
-    
-    def _resolve_manifest_path(self, raw: str) -> Optional[str]:
-        """Resolve a single manifest sample path to a validated absolute path.
-
-        Tries ``base=tensor_dir`` first (correct for new manifests that store
-        paths relative to the tensor directory).  If the resulting path does
-        not exist on disk, falls back to resolving against the global safe
-        root (backward compat for legacy manifests that stored CWD-relative
-        paths like ``./datasets/…/foo.pt``).
-
-        Returns:
-            Validated absolute path, or ``None`` if the path cannot be
-            resolved safely.
-        """
-        # Primary: resolve relative to tensor_dir
-        try:
-            child = safe_path(raw, base=self.tensor_dir)
-            if os.path.exists(child):
-                return child
-        except ValueError:
-            pass
-
-        # Legacy fallback: resolve relative to global safe root (CWD)
-        try:
-            child = safe_path(raw)
-            if os.path.exists(child):
-                logger.debug(
-                    f"Resolved legacy manifest path via safe root: {raw}"
-                )
-                return child
-        except ValueError:
-            pass
-
-        logger.warning(f"Skipping unresolvable manifest path: {raw}")
-        return None
-
-    def __len__(self) -> int:
-        return len(self.valid_paths)
-    
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """Load a preprocessed tensor file.
-        
-        Returns:
-            Dictionary containing all pre-computed tensors for training
-        """
-        tensor_path = self.valid_paths[idx]
-        data = torch.load(tensor_path, map_location='cpu', weights_only=True)
-        
-        return {
-            "target_latents": data["target_latents"],  # [T, 64]
-            "attention_mask": data["attention_mask"],  # [T]
-            "encoder_hidden_states": data["encoder_hidden_states"],  # [L, D]
-            "encoder_attention_mask": data["encoder_attention_mask"],  # [L]
-            "context_latents": data["context_latents"],  # [T, 65]
-            "metadata": data.get("metadata", {}),
-        }
-
-
-def collate_preprocessed_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
-    """Collate function for preprocessed tensor batches.
-    
-    Handles variable-length tensors by padding to the longest in the batch.
-    
-    Args:
-        batch: List of sample dictionaries with pre-computed tensors
-        
-    Returns:
-        Batched dictionary with all tensors stacked
-    """
-    # Get max lengths
-    max_latent_len = max(s["target_latents"].shape[0] for s in batch)
-    max_encoder_len = max(s["encoder_hidden_states"].shape[0] for s in batch)
-    
-    # Pad and stack tensors
-    target_latents = []
-    attention_masks = []
-    encoder_hidden_states = []
-    encoder_attention_masks = []
-    context_latents = []
-    
-    for sample in batch:
-        # Pad target_latents [T, 64] -> [max_T, 64]
-        tl = sample["target_latents"]
-        if tl.shape[0] < max_latent_len:
-            pad = tl.new_zeros(max_latent_len - tl.shape[0], tl.shape[1])
-            tl = torch.cat([tl, pad], dim=0)
-        target_latents.append(tl)
-        
-        # Pad attention_mask [T] -> [max_T]
-        am = sample["attention_mask"]
-        if am.shape[0] < max_latent_len:
-            pad = am.new_zeros(max_latent_len - am.shape[0])
-            am = torch.cat([am, pad], dim=0)
-        attention_masks.append(am)
-        
-        # Pad context_latents [T, 65] -> [max_T, 65]
-        cl = sample["context_latents"]
-        if cl.shape[0] < max_latent_len:
-            pad = cl.new_zeros(max_latent_len - cl.shape[0], cl.shape[1])
-            cl = torch.cat([cl, pad], dim=0)
-        context_latents.append(cl)
-        
-        # Pad encoder_hidden_states [L, D] -> [max_L, D]
-        ehs = sample["encoder_hidden_states"]
-        if ehs.shape[0] < max_encoder_len:
-            pad = ehs.new_zeros(max_encoder_len - ehs.shape[0], ehs.shape[1])
-            ehs = torch.cat([ehs, pad], dim=0)
-        encoder_hidden_states.append(ehs)
-        
-        # Pad encoder_attention_mask [L] -> [max_L]
-        eam = sample["encoder_attention_mask"]
-        if eam.shape[0] < max_encoder_len:
-            pad = eam.new_zeros(max_encoder_len - eam.shape[0])
-            eam = torch.cat([eam, pad], dim=0)
-        encoder_attention_masks.append(eam)
-    
-    return {
-        "target_latents": torch.stack(target_latents),  # [B, T, 64]
-        "attention_mask": torch.stack(attention_masks),  # [B, T]
-        "encoder_hidden_states": torch.stack(encoder_hidden_states),  # [B, L, D]
-        "encoder_attention_mask": torch.stack(encoder_attention_masks),  # [B, L]
-        "context_latents": torch.stack(context_latents),  # [B, T, 65]
-        "metadata": [s["metadata"] for s in batch],
-    }
+from acestep.training.preprocessed_sampler import BucketedBatchSampler
+from acestep.training.preprocessed_dataset import PreprocessedTensorDataset
+from acestep.training.preprocessed_collate import collate_preprocessed_batch
 
 
 class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
     """DataModule for preprocessed tensor files.
-    
-    This is the recommended DataModule for training. It loads pre-computed tensors
-    directly without needing VAE, text encoder, or condition encoder at training time.
+
+    Loads precomputed tensors directly, avoiding VAE/text encoding at train time.
     """
-    
+
     def __init__(
         self,
         tensor_dir: str,
@@ -234,19 +53,28 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         persistent_workers: bool = True,
         pin_memory_device: str = "",
         val_split: float = 0.0,
+        length_bucket: bool = False,
+        cache_policy: str = "none",
+        cache_max_items: int = 0,
     ):
-        """Initialize the data module.
-        
+        """Initialize the preprocessed data module.
+
         Args:
-            tensor_dir: Directory containing preprocessed .pt files
-            batch_size: Training batch size
-            num_workers: Number of data loading workers
-            pin_memory: Whether to pin memory for faster GPU transfer
-            val_split: Fraction of data for validation (0 = no validation)
+            tensor_dir: Directory containing preprocessed ``.pt`` files.
+            batch_size: Training batch size.
+            num_workers: Number of DataLoader worker processes.
+            pin_memory: Pin host memory for faster GPU transfer.
+            prefetch_factor: Number of prefetched batches per worker.
+            persistent_workers: Keep worker processes alive between epochs.
+            pin_memory_device: Device string used by pinned memory allocator.
+            val_split: Fraction of data reserved for validation.
+            length_bucket: Whether to bucket training samples by latent length.
+            cache_policy: Dataset cache mode ("none" or "ram_lru").
+            cache_max_items: Maximum cached entries when RAM LRU is enabled.
         """
         if LIGHTNING_AVAILABLE:
             super().__init__()
-        
+
         self.tensor_dir = tensor_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -255,28 +83,50 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         self.persistent_workers = persistent_workers
         self.pin_memory_device = pin_memory_device
         self.val_split = val_split
-        
+        self.length_bucket = length_bucket
+        self.cache_policy = cache_policy
+        self.cache_max_items = cache_max_items
+
         self.train_dataset = None
         self.val_dataset = None
-    
+
     def setup(self, stage: Optional[str] = None):
-        """Setup datasets."""
-        if stage == 'fit' or stage is None:
-            # Create full dataset
-            full_dataset = PreprocessedTensorDataset(self.tensor_dir)
-            
-            # Split if validation requested
+        """Setup training/validation datasets."""
+        if stage == "fit" or stage is None:
+            full_dataset = PreprocessedTensorDataset(
+                self.tensor_dir,
+                cache_policy=self.cache_policy,
+                cache_max_items=self.cache_max_items,
+            )
             if self.val_split > 0 and len(full_dataset) > 1:
                 n_val = max(1, int(len(full_dataset) * self.val_split))
                 n_train = len(full_dataset) - n_val
-                
                 self.train_dataset, self.val_dataset = torch.utils.data.random_split(
                     full_dataset, [n_train, n_val]
                 )
             else:
                 self.train_dataset = full_dataset
                 self.val_dataset = None
-    
+
+    def _resolve_train_latent_lengths(self) -> Optional[List[int]]:
+        """Resolve latent lengths for bucketed sampling, including Subset splits."""
+        if not self.length_bucket or self.train_dataset is None:
+            return None
+
+        ds = self.train_dataset
+        if isinstance(ds, torch.utils.data.Subset):
+            base = ds.dataset
+            indices = list(ds.indices)
+            base_lengths = getattr(base, "latent_lengths", None)
+            if base_lengths is None:
+                return None
+            return [base_lengths[i] for i in indices]
+
+        base_lengths = getattr(ds, "latent_lengths", None)
+        if base_lengths is None:
+            return None
+        return list(base_lengths)
+
     def train_dataloader(self) -> DataLoader:
         """Create training dataloader."""
         prefetch_factor = None if self.num_workers == 0 else self.prefetch_factor
@@ -284,7 +134,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         kwargs = dict(
             dataset=self.train_dataset,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=not self.length_bucket,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=collate_preprocessed_batch,
@@ -294,8 +144,21 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         )
         if self.pin_memory_device:
             kwargs["pin_memory_device"] = self.pin_memory_device
+
+        latent_lengths = self._resolve_train_latent_lengths()
+        if latent_lengths is not None:
+            kwargs.pop("batch_size", None)
+            kwargs.pop("shuffle", None)
+            kwargs["batch_sampler"] = BucketedBatchSampler(
+                lengths=latent_lengths,
+                batch_size=self.batch_size,
+                shuffle=True,
+            )
+        elif self.length_bucket:
+            kwargs["shuffle"] = True
+
         return DataLoader(**kwargs)
-    
+
     def val_dataloader(self) -> Optional[DataLoader]:
         """Create validation dataloader."""
         if self.val_dataset is None:
@@ -474,10 +337,27 @@ class AceStepDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
         pin_memory: bool = True,
         max_duration: float = 240.0,
         val_split: float = 0.0,
+        length_bucket: bool = False,
+        cache_policy: str = "none",
+        cache_max_items: int = 0,
     ):
+        """Initialize legacy raw-audio datamodule.
+
+        Args:
+            samples: Raw training sample metadata entries.
+            dit_handler: Model handler used by legacy training flows.
+            batch_size: Number of samples per batch.
+            num_workers: Number of dataloader workers.
+            pin_memory: Whether to enable pinned memory in dataloaders.
+            max_duration: Max audio duration (seconds) for clipping.
+            val_split: Validation split fraction.
+            length_bucket: Accepted for compatibility; unused for raw audio mode.
+            cache_policy: Accepted for compatibility; unused for raw audio mode.
+            cache_max_items: Accepted for compatibility; unused for raw audio mode.
+        """
         if LIGHTNING_AVAILABLE:
             super().__init__()
-        
+
         self.samples = samples
         self.dit_handler = dit_handler
         self.batch_size = batch_size
@@ -485,6 +365,9 @@ class AceStepDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
         self.pin_memory = pin_memory
         self.max_duration = max_duration
         self.val_split = val_split
+        self.length_bucket = length_bucket
+        self.cache_policy = cache_policy
+        self.cache_max_items = cache_max_items
         
         self.train_dataset = None
         self.val_dataset = None

@@ -7,11 +7,16 @@ load_dataset_from_json that guards against path-traversal attacks
 
 import os
 import json
+import random
 import tempfile
 import unittest
+from unittest import mock
+
+import torch
 
 from acestep.training.path_safety import safe_path, set_safe_root
 from acestep.training.data_module import (
+    BucketedBatchSampler,
     PreprocessedTensorDataset,
     load_dataset_from_json,
 )

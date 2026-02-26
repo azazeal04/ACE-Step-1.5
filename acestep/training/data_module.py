@@ -57,8 +57,15 @@ class BucketedBatchSampler:
                 yield group[start:start + self.batch_size]
 
     def __len__(self) -> int:
-        total = len(self.lengths)
-        return (total + self.batch_size - 1) // self.batch_size
+        bucket_counts: Dict[int, int] = {}
+        for length in self.lengths:
+            bucket = int(length // 64)
+            bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+
+        return sum(
+            (count + self.batch_size - 1) // self.batch_size
+            for count in bucket_counts.values()
+        )
 
 
 class PreprocessedTensorDataset(Dataset):

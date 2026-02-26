@@ -7,11 +7,16 @@ load_dataset_from_json that guards against path-traversal attacks
 
 import os
 import json
+import random
 import tempfile
 import unittest
+from unittest import mock
+
+import torch
 
 from acestep.training.path_safety import safe_path, set_safe_root
 from acestep.training.data_module import (
+    BucketedBatchSampler,
     PreprocessedTensorDataset,
     load_dataset_from_json,
 )
@@ -191,6 +196,98 @@ class LoadDatasetFromJsonTests(unittest.TestCase):
             self.assertEqual(meta["v"], 1)
         finally:
             os.unlink(path)
+
+
+class AceStepDataModuleInitTests(unittest.TestCase):
+    """Regression tests for legacy ``AceStepDataModule`` initialization."""
+
+    def test_init_does_not_require_preprocessed_only_cache_args(self):
+        """Legacy raw-audio datamodule should initialize without NameError."""
+        from acestep.training.data_module import AceStepDataModule
+
+        module = AceStepDataModule(samples=[], dit_handler=object())
+
+        self.assertEqual(module.samples, [])
+        self.assertIsNotNone(module.dit_handler)
+
+
+class BucketedBatchSamplerTests(unittest.TestCase):
+    """Tests for bucketed batching semantics and sizing."""
+
+    def test_len_counts_batches_per_bucket(self):
+        """Length should be the sum of per-bucket ceiling batch counts."""
+        lengths = [10, 20, 30, 65, 130]
+        sampler = BucketedBatchSampler(lengths=lengths, batch_size=2, shuffle=False)
+
+        self.assertEqual(len(sampler), 4)
+
+    def test_shuffle_changes_order_but_preserves_batch_sizes(self):
+        """Shuffling should only affect order, not total sample coverage."""
+        lengths = [8, 9, 70, 72, 140, 141]
+
+        baseline = list(BucketedBatchSampler(lengths=lengths, batch_size=2, shuffle=False))
+
+        random.seed(1234)
+        shuffled = list(BucketedBatchSampler(lengths=lengths, batch_size=2, shuffle=True))
+
+        baseline_indices = sorted(idx for batch in baseline for idx in batch)
+        shuffled_indices = sorted(idx for batch in shuffled for idx in batch)
+
+        self.assertEqual(baseline_indices, shuffled_indices)
+        self.assertTrue(all(0 < len(batch) <= 2 for batch in shuffled))
+
+
+class PreprocessedTensorDatasetCachingTests(unittest.TestCase):
+    """Tests for preprocessed dataset LRU cache behavior and latent lengths."""
+
+    def setUp(self):
+        set_safe_root(tempfile.gettempdir())
+
+    def _write_sample(self, path: str, length: int) -> None:
+        """Write a minimal valid tensor sample for test dataset usage."""
+        sample = {
+            "target_latents": torch.zeros(length, 64),
+            "attention_mask": torch.ones(length),
+            "encoder_hidden_states": torch.zeros(2, 4),
+            "encoder_attention_mask": torch.ones(2),
+            "context_latents": torch.zeros(length, 65),
+        }
+        torch.save(sample, path)
+
+    def test_latent_lengths_from_valid_and_invalid_files(self):
+        """Dataset should record true lengths and use 0 for invalid tensors."""
+        with tempfile.TemporaryDirectory() as d:
+            valid = os.path.join(d, "valid.pt")
+            invalid = os.path.join(d, "invalid.pt")
+            self._write_sample(valid, 7)
+            torch.save({"not_target_latents": torch.ones(1)}, invalid)
+
+            with open(os.path.join(d, "manifest.json"), "w") as f:
+                json.dump({"samples": ["valid.pt", "invalid.pt"]}, f)
+
+            ds = PreprocessedTensorDataset(d)
+            self.assertEqual(ds.latent_lengths, [7, 0])
+
+    def test_ram_lru_cache_eviction(self):
+        """LRU cache should evict the least-recently used item at capacity."""
+        with tempfile.TemporaryDirectory() as d:
+            for name, length in (("a.pt", 5), ("b.pt", 6), ("c.pt", 7)):
+                self._write_sample(os.path.join(d, name), length)
+
+            with open(os.path.join(d, "manifest.json"), "w") as f:
+                json.dump({"samples": ["a.pt", "b.pt", "c.pt"]}, f)
+
+            ds = PreprocessedTensorDataset(d, cache_policy="ram_lru", cache_max_items=2)
+            with mock.patch("acestep.training.data_module.torch.load", wraps=torch.load) as load_mock:
+                _ = ds[0]
+                _ = ds[1]
+                _ = ds[0]
+                _ = ds[2]
+                _ = ds[1]
+
+            self.assertEqual(load_mock.call_count, 4)
+            self.assertEqual(list(ds._cache.keys()), [2, 1])
+
 
 
 if __name__ == "__main__":

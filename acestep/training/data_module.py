@@ -57,8 +57,15 @@ class BucketedBatchSampler:
                 yield group[start:start + self.batch_size]
 
     def __len__(self) -> int:
-        total = len(self.lengths)
-        return (total + self.batch_size - 1) // self.batch_size
+        bucket_counts: Dict[int, int] = {}
+        for length in self.lengths:
+            bucket = int(length // 64)
+            bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+
+        return sum(
+            (count + self.batch_size - 1) // self.batch_size
+            for count in bucket_counts.values()
+        )
 
 
 class PreprocessedTensorDataset(Dataset):
@@ -551,9 +558,6 @@ class AceStepDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
         self.pin_memory = pin_memory
         self.max_duration = max_duration
         self.val_split = val_split
-        self.length_bucket = length_bucket
-        self.cache_policy = cache_policy
-        self.cache_max_items = cache_max_items
         
         self.train_dataset = None
         self.val_dataset = None

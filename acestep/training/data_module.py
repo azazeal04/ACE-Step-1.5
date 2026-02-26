@@ -8,6 +8,7 @@ Supports both raw audio loading and preprocessed tensor loading.
 import os
 import json
 import random
+from collections import OrderedDict
 from typing import Optional, List, Dict, Any, Tuple
 from loguru import logger
 
@@ -32,6 +33,34 @@ except ImportError:
 # Preprocessed Tensor Dataset (Recommended for Training)
 # ============================================================================
 
+class BucketedBatchSampler:
+    """Batch sampler that groups indices by latent length buckets."""
+
+    def __init__(self, lengths: List[int], batch_size: int, shuffle: bool = True) -> None:
+        self.lengths = lengths
+        self.batch_size = max(1, int(batch_size))
+        self.shuffle = shuffle
+
+    def __iter__(self):
+        buckets: Dict[int, List[int]] = {}
+        for idx, length in enumerate(self.lengths):
+            bucket = int(length // 64)
+            buckets.setdefault(bucket, []).append(idx)
+        bucket_keys = list(buckets.keys())
+        if self.shuffle:
+            random.shuffle(bucket_keys)
+        for key in bucket_keys:
+            group = buckets[key]
+            if self.shuffle:
+                random.shuffle(group)
+            for start in range(0, len(group), self.batch_size):
+                yield group[start:start + self.batch_size]
+
+    def __len__(self) -> int:
+        total = len(self.lengths)
+        return (total + self.batch_size - 1) // self.batch_size
+
+
 class PreprocessedTensorDataset(Dataset):
     """Dataset that loads preprocessed tensor files.
     
@@ -45,7 +74,7 @@ class PreprocessedTensorDataset(Dataset):
     No VAE/text encoder needed during training - just load tensors directly!
     """
     
-    def __init__(self, tensor_dir: str):
+    def __init__(self, tensor_dir: str, cache_policy: str = "none", cache_max_items: int = 0):
         """Initialize from a directory of preprocessed .pt files.
         
         Args:
@@ -59,6 +88,9 @@ class PreprocessedTensorDataset(Dataset):
             raise ValueError(f"Not an existing directory: {tensor_dir}")
         self.tensor_dir = validated_dir
         self.sample_paths: List[str] = []
+        self.cache_policy = cache_policy
+        self.cache_max_items = max(0, int(cache_max_items))
+        self._cache: "OrderedDict[int, Dict[str, Any]]" = OrderedDict()
         
         # Load manifest if exists
         manifest_path = safe_path("manifest.json", base=self.tensor_dir)
@@ -87,6 +119,14 @@ class PreprocessedTensorDataset(Dataset):
                 f"{len(self.sample_paths) - len(self.valid_paths)} missing"
             )
         
+        self.latent_lengths: List[int] = []
+        for vp in self.valid_paths:
+            try:
+                sample = torch.load(vp, map_location="cpu", weights_only=True)
+                self.latent_lengths.append(int(sample["target_latents"].shape[0]))
+            except Exception:
+                self.latent_lengths.append(0)
+
         logger.info(
             f"PreprocessedTensorDataset: {len(self.valid_paths)} samples "
             f"from {self.tensor_dir}"
@@ -136,15 +176,23 @@ class PreprocessedTensorDataset(Dataset):
         Returns:
             Dictionary containing all pre-computed tensors for training
         """
-        tensor_path = self.valid_paths[idx]
-        data = torch.load(tensor_path, map_location='cpu', weights_only=True)
-        
+        if self.cache_policy == "ram_lru" and idx in self._cache:
+            data = self._cache.pop(idx)
+            self._cache[idx] = data
+        else:
+            tensor_path = self.valid_paths[idx]
+            data = torch.load(tensor_path, map_location='cpu', weights_only=True)
+            if self.cache_policy == "ram_lru" and self.cache_max_items > 0:
+                self._cache[idx] = data
+                while len(self._cache) > self.cache_max_items:
+                    self._cache.popitem(last=False)
+
         return {
-            "target_latents": data["target_latents"],  # [T, 64]
-            "attention_mask": data["attention_mask"],  # [T]
-            "encoder_hidden_states": data["encoder_hidden_states"],  # [L, D]
-            "encoder_attention_mask": data["encoder_attention_mask"],  # [L]
-            "context_latents": data["context_latents"],  # [T, 65]
+            "target_latents": data["target_latents"],
+            "attention_mask": data["attention_mask"],
+            "encoder_hidden_states": data["encoder_hidden_states"],
+            "encoder_attention_mask": data["encoder_attention_mask"],
+            "context_latents": data["context_latents"],
             "metadata": data.get("metadata", {}),
         }
 
@@ -234,6 +282,9 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         persistent_workers: bool = True,
         pin_memory_device: str = "",
         val_split: float = 0.0,
+        length_bucket: bool = False,
+        cache_policy: str = "none",
+        cache_max_items: int = 0,
     ):
         """Initialize the data module.
         
@@ -255,6 +306,9 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         self.persistent_workers = persistent_workers
         self.pin_memory_device = pin_memory_device
         self.val_split = val_split
+        self.length_bucket = length_bucket
+        self.cache_policy = cache_policy
+        self.cache_max_items = cache_max_items
         
         self.train_dataset = None
         self.val_dataset = None
@@ -263,7 +317,11 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         """Setup datasets."""
         if stage == 'fit' or stage is None:
             # Create full dataset
-            full_dataset = PreprocessedTensorDataset(self.tensor_dir)
+            full_dataset = PreprocessedTensorDataset(
+                self.tensor_dir,
+                cache_policy=self.cache_policy,
+                cache_max_items=self.cache_max_items,
+            )
             
             # Split if validation requested
             if self.val_split > 0 and len(full_dataset) > 1:
@@ -284,7 +342,7 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         kwargs = dict(
             dataset=self.train_dataset,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=not self.length_bucket,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=collate_preprocessed_batch,
@@ -294,6 +352,14 @@ class PreprocessedDataModule(LightningDataModule if LIGHTNING_AVAILABLE else obj
         )
         if self.pin_memory_device:
             kwargs["pin_memory_device"] = self.pin_memory_device
+        if self.length_bucket and hasattr(self.train_dataset, "latent_lengths"):
+            kwargs.pop("batch_size", None)
+            kwargs.pop("shuffle", None)
+            kwargs["batch_sampler"] = BucketedBatchSampler(
+                lengths=list(getattr(self.train_dataset, "latent_lengths", [])),
+                batch_size=self.batch_size,
+                shuffle=True,
+            )
         return DataLoader(**kwargs)
     
     def val_dataloader(self) -> Optional[DataLoader]:
@@ -485,6 +551,9 @@ class AceStepDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
         self.pin_memory = pin_memory
         self.max_duration = max_duration
         self.val_split = val_split
+        self.length_bucket = length_bucket
+        self.cache_policy = cache_policy
+        self.cache_max_items = cache_max_items
         
         self.train_dataset = None
         self.val_dataset = None

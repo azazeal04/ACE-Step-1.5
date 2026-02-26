@@ -551,9 +551,6 @@ class AceStepDataModule(LightningDataModule if LIGHTNING_AVAILABLE else object):
         self.pin_memory = pin_memory
         self.max_duration = max_duration
         self.val_split = val_split
-        self.length_bucket = length_bucket
-        self.cache_policy = cache_policy
-        self.cache_max_items = cache_max_items
         
         self.train_dataset = None
         self.val_dataset = None

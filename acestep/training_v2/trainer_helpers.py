@@ -363,9 +363,14 @@ def resume_checkpoint(
         yield TrainingUpdate(0, 0.0, "[OK] LoKR weights loaded (no training state)", kind="info")
         return None
 
-    # Warn if LoKR was expected but checkpoint is LoRA-format
+    # Full mode resume: no full decoder checkpoint found.
     if getattr(trainer.training_config, "training_mode", "adapter") == "full":
-        _save_full_decoder_state(module, output_dir)
+        yield TrainingUpdate(
+            0,
+            0.0,
+            f"[WARN] full_decoder_state.pt not found in {ckpt_dir}",
+            kind="warn",
+        )
         return
 
     if trainer.adapter_type == "lokr":

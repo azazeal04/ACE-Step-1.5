@@ -193,5 +193,19 @@ class LoadDatasetFromJsonTests(unittest.TestCase):
             os.unlink(path)
 
 
+class AceStepDataModuleInitTests(unittest.TestCase):
+    """Regression tests for legacy ``AceStepDataModule`` initialization."""
+
+    def test_init_does_not_require_preprocessed_only_cache_args(self):
+        """Legacy raw-audio datamodule should initialize without NameError."""
+        from acestep.training.data_module import AceStepDataModule
+
+        module = AceStepDataModule(samples=[], dit_handler=object())
+
+        self.assertEqual(module.samples, [])
+        self.assertIsNotNone(module.dit_handler)
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -133,6 +133,26 @@ def offload_non_decoder(model: nn.Module) -> int:
 # Adapter-aware save helpers
 # ---------------------------------------------------------------------------
 
+
+def _save_full_decoder_state(module: Any, output_dir: str) -> None:
+    """Save decoder state for full fine-tuning mode."""
+    decoder = _unwrap_decoder(module.model)
+    path = os.path.join(output_dir, "full_decoder_state.pt")
+    torch.save(decoder.state_dict(), path)
+    logger.info("[OK] Full decoder weights saved to %s", path)
+
+
+def _load_full_decoder_state(module: Any, ckpt_dir: Path) -> bool:
+    """Load full decoder checkpoint when present."""
+    path = ckpt_dir / "full_decoder_state.pt"
+    if not path.exists():
+        return False
+    state = torch.load(str(path), map_location=module.device, weights_only=True)
+    decoder = _unwrap_decoder(module.model)
+    decoder.load_state_dict(state, strict=False)
+    return True
+
+
 def save_adapter_flat(trainer: Any, output_dir: str) -> None:
     """Save adapter weights directly into *output_dir* (no nesting).
 
@@ -143,6 +163,10 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
     module = trainer.module
     assert module is not None
     os.makedirs(output_dir, exist_ok=True)
+
+    if getattr(trainer.training_config, "training_mode", "adapter") == "full":
+        _save_full_decoder_state(module, output_dir)
+        return
 
     if trainer.adapter_type == "lokr":
         if module.lycoris_net is None:
@@ -223,6 +247,11 @@ def verify_saved_adapter(output_dir: str) -> None:
     a warning if the weights appear to be all zeros (which would mean
     the LoRA has no effect during inference).
     """
+    full_path = os.path.join(output_dir, "full_decoder_state.pt")
+    if os.path.exists(full_path):
+        logger.info("[OK] Full fine-tune weights saved: %s", full_path)
+        return
+
     safetensors_path = os.path.join(output_dir, "adapter_model.safetensors")
     config_path = os.path.join(output_dir, "adapter_config.json")
 
@@ -292,9 +321,25 @@ def resume_checkpoint(
         )
         ckpt_dir = ckpt_dir.parent
 
+    state_path = ckpt_dir / "training_state.pt"
+
+    if getattr(trainer.training_config, "training_mode", "adapter") == "full":
+        if _load_full_decoder_state(module, ckpt_dir):
+            if state_path.exists():
+                state = torch.load(str(state_path), map_location=module.device, weights_only=False)
+                epoch = state.get("epoch", 0)
+                step = state.get("global_step", 0)
+                if "optimizer_state_dict" in state:
+                    optimizer.load_state_dict(state["optimizer_state_dict"])
+                if "scheduler_state_dict" in state:
+                    scheduler.load_state_dict(state["scheduler_state_dict"])
+                yield TrainingUpdate(0, 0.0, f"[OK] Resumed full fine-tune from epoch {epoch}, step {step}", kind="info")
+                return (epoch, step)
+            yield TrainingUpdate(0, 0.0, "[OK] Loaded full decoder weights (no training state)", kind="info")
+            return None
+
     # -- Detect format: LoKR uses lokr_weights.safetensors ---------------
     lokr_weights_path = ckpt_dir / "lokr_weights.safetensors"
-    state_path = ckpt_dir / "training_state.pt"
 
     if lokr_weights_path.exists() and module.lycoris_net is not None:
         # LoKR resume
@@ -352,9 +397,7 @@ def resume_checkpoint(
                 load_file(aw_path) if aw_path.endswith(".safetensors")
                 else torch.load(aw_path, map_location=module.device, weights_only=True)
             )
-            decoder = module.model.decoder
-            if hasattr(decoder, "_forward_module"):
-                decoder = decoder._forward_module
+            decoder = _unwrap_decoder(module.model)
             decoder.load_state_dict(state_dict, strict=False)
 
             start_epoch = ckpt_info["epoch"]

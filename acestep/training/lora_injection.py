@@ -12,6 +12,66 @@ import torch.nn as nn
 
 from acestep.training.configs import LoRAConfig
 
+
+def _safe_enable_input_require_grads(self):
+    """Safely call enable_input_require_grads on the decoder.
+
+    This helper wraps the original enable_input_require_grads method,
+    handling NotImplementedError gracefully and tracking whether the hook
+    was successfully enabled.
+
+    Args:
+        self: The decoder module to call enable_input_require_grads on.
+    """
+    orig_enable_input_require_grads = getattr(
+        self, "_acestep_orig_enable_input_require_grads", None
+    )
+    if orig_enable_input_require_grads is None:
+        if hasattr(self, "enable_input_require_grads") and not hasattr(
+            self, "_acestep_orig_enable_input_require_grads"
+        ):
+            self._acestep_orig_enable_input_require_grads = (
+                self.enable_input_require_grads
+            )
+            orig_enable_input_require_grads = (
+                self._acestep_orig_enable_input_require_grads
+            )
+        else:
+            orig_enable_input_require_grads = None
+
+    try:
+        if orig_enable_input_require_grads is not None:
+            result = orig_enable_input_require_grads()
+        else:
+            result = None
+        try:
+            self._acestep_input_grads_hook_enabled = True
+        except Exception:
+            logger.debug(
+                "Failed to set _acestep_input_grads_hook_enabled", exc_info=True
+            )
+        return result
+    except NotImplementedError:
+        try:
+            self._acestep_input_grads_hook_enabled = False
+        except Exception:
+            logger.debug(
+                "Failed to set _acestep_input_grads_hook_enabled", exc_info=True
+            )
+        if not getattr(self, "_acestep_input_grads_warning_emitted", False):
+            logger.info(
+                "Skipping enable_input_require_grads for decoder: "
+                "get_input_embeddings is not implemented (expected for DiT)"
+            )
+            try:
+                self._acestep_input_grads_warning_emitted = True
+            except Exception:
+                logger.debug(
+                    "Failed to set _acestep_input_grads_warning_emitted", exc_info=True
+                )
+        return None
+
+
 try:
     from peft import (
         get_peft_model,
@@ -139,32 +199,6 @@ def inject_lora_into_dit(
     model.decoder = decoder
 
     if hasattr(decoder, "enable_input_require_grads"):
-        orig_enable_input_require_grads = decoder.enable_input_require_grads
-
-        def _safe_enable_input_require_grads(self):
-            try:
-                result = orig_enable_input_require_grads()
-                try:
-                    self._acestep_input_grads_hook_enabled = True
-                except Exception:
-                    pass
-                return result
-            except NotImplementedError:
-                try:
-                    self._acestep_input_grads_hook_enabled = False
-                except Exception:
-                    pass
-                if not getattr(self, "_acestep_input_grads_warning_emitted", False):
-                    logger.info(
-                        "Skipping enable_input_require_grads for decoder: "
-                        "get_input_embeddings is not implemented (expected for DiT)"
-                    )
-                    try:
-                        self._acestep_input_grads_warning_emitted = True
-                    except Exception:
-                        pass
-                return None
-
         decoder.enable_input_require_grads = types.MethodType(
             _safe_enable_input_require_grads, decoder
         )

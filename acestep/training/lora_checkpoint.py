@@ -69,7 +69,7 @@ def save_lora_weights(
 def load_lora_weights(
     model: Module,
     lora_path: str,
-    lora_config: Optional[LoRAConfig] = None,
+    _lora_config: Optional[LoRAConfig] = None,
 ) -> Module:
     """Load LoRA adapter weights into the model.
 
@@ -130,7 +130,7 @@ def save_training_checkpoint(
     output_dir = safe_path(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    adapter_path = save_lora_weights(model, output_dir)
+    save_lora_weights(model, output_dir)
 
     training_state = {
         "epoch": epoch,
@@ -158,8 +158,10 @@ def load_training_checkpoint(
 
     Args:
         checkpoint_dir: Directory containing checkpoint files
-        optimizer: Optimizer instance to load state into (optional)
-        scheduler: Scheduler instance to load state into (optional)
+        optimizer: Optimizer instance to load state into (optional).
+            When provided, loads optimizer_state_dict from the checkpoint.
+        scheduler: Scheduler instance to load state into (optional).
+            When provided, loads scheduler_state_dict from the checkpoint.
         device: Device to load tensors to
 
     Returns:
@@ -167,8 +169,8 @@ def load_training_checkpoint(
         - epoch: Saved epoch number
         - global_step: Saved global step
         - adapter_path: Path to adapter weights
-        - loaded_optimizer: Whether optimizer state was loaded
-        - loaded_scheduler: Whether scheduler state was loaded
+        - loaded_optimizer: Whether optimizer state was loaded (True when optimizer param provided and state loaded)
+        - loaded_scheduler: Whether scheduler state was loaded (True when scheduler param provided and state loaded)
     """
     result = {
         "epoch": 0,
@@ -194,7 +196,7 @@ def load_training_checkpoint(
     if os.path.isfile(state_path):
         try:
             training_state = torch.load(
-                state_path, map_location=device, weights_only=False
+                state_path, map_location=device, weights_only=True
             )
 
             if "epoch" in training_state:
@@ -211,6 +213,28 @@ def load_training_checkpoint(
                     logger.warning(
                         f"Failed to parse 'global_step' from training_state.pt: {e}, using default 0"
                     )
+
+            if optimizer is not None and "optimizer_state_dict" in training_state:
+                try:
+                    optimizer_state = training_state["optimizer_state_dict"]
+                    if device is not None:
+                        for state in optimizer_state.get("state", {}).values():
+                            for k, v in state.items():
+                                if isinstance(v, torch.Tensor):
+                                    state[k] = v.to(device)
+                    optimizer.load_state_dict(optimizer_state)
+                    result["loaded_optimizer"] = True
+                    logger.info("Loaded optimizer state from checkpoint")
+                except (RuntimeError, ValueError, KeyError) as e:
+                    logger.warning(f"Failed to load optimizer state: {e}")
+
+            if scheduler is not None and "scheduler_state_dict" in training_state:
+                try:
+                    scheduler.load_state_dict(training_state["scheduler_state_dict"])
+                    result["loaded_scheduler"] = True
+                    logger.info("Loaded scheduler state from checkpoint")
+                except (RuntimeError, ValueError, KeyError) as e:
+                    logger.warning(f"Failed to load scheduler state: {e}")
 
             logger.info(
                 f"Loaded checkpoint metadata from epoch {result['epoch']}, step {result['global_step']}"

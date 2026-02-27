@@ -1,4 +1,4 @@
-"""Unit tests for acestep.training.lora_utils module."""
+"""Unit tests for acestep.training.lora_injection and acestep.training.lora_utils modules."""
 
 import unittest
 from unittest.mock import MagicMock, patch

@@ -98,7 +98,7 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.nn as nn
 
-from acestep.training.lora_utils import inject_lora_into_dit
+from acestep.training.lora_injection import inject_lora_into_dit
 ```
 
 **Naming conventions**:

@@ -507,7 +507,7 @@ class PreprocessedLoRAModule(nn.Module):
             x0 = target_latents  # Data
 
             # Sample timesteps from discrete turbo shift=3 schedule (8 steps)
-            t, r = sample_discrete_timestep(bsz, self.timesteps_tensor)
+            t, _ = sample_discrete_timestep(bsz, self.timesteps_tensor)
             t_ = t.unsqueeze(-1).unsqueeze(-1)
 
             # Interpolate: x_t = t * x1 + (1 - t) * x0
@@ -943,7 +943,7 @@ class LoRATrainer:
             num_updates = 0
             epoch_start_time = time.time()
 
-            for batch_idx, batch in enumerate(train_loader):
+            for _batch_idx, batch in enumerate(train_loader):
                 # Check for stop signal
                 if training_state and training_state.get("should_stop", False):
                     yield (
@@ -1097,7 +1097,7 @@ class LoRATrainer:
             yield (
                 global_step,
                 avg_epoch_loss,
-                f"✅ Epoch {epoch + 1}/{self.training_config.max_epochs} in {epoch_time:.1f}s, Loss: {avg_epoch_loss:.4f}",
+                "💾 Checkpoint saved at epoch {epoch + 1}",
             )
 
             # Validation and best checkpoint (if validation set exists)
@@ -1309,7 +1309,7 @@ class LoRATrainer:
                     self.training_config.output_dir, "checkpoints", f"epoch_{epoch + 1}"
                 )
                 save_lora_weights(self.module.model, checkpoint_dir)
-                yield global_step, avg_epoch_loss, f"💾 Checkpoint saved"
+                yield global_step, avg_epoch_loss, "💾 Checkpoint saved"
 
         final_path = os.path.join(self.training_config.output_dir, "final")
         save_lora_weights(self.module.model, final_path)

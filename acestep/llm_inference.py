@@ -2658,12 +2658,19 @@ class LLMHandler:
 
     @staticmethod
     def _is_mlx_available() -> bool:
-        """Check if MLX framework is available (Apple Silicon)."""
+        """Check if MLX framework is available (Apple Silicon).
+
+        Delegates to the cached ``mlx_available()`` helper to avoid
+        re-importing ``mlx.core`` when the native extension failed on
+        first load (which causes a fatal nanobind duplicate-enum crash).
+        """
         try:
-            import mlx.core as mx
+            from acestep.models.mlx import mlx_available
+            if not mlx_available():
+                return False
             import mlx_lm
             return True
-        except ImportError:
+        except Exception:
             return False
 
     def _load_mlx_model(self, model_path: str) -> Tuple[bool, str]:

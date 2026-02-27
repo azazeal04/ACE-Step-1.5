@@ -232,9 +232,6 @@ echo
 if [[ -f "$SCRIPT_DIR/python_embeded/bin/python3.11" ]]; then
     echo "[Environment] Found embedded Python, verifying..."
 
-    # Ensure executable permissions on binaries (may be lost after extraction)
-    chmod +x "$SCRIPT_DIR/python_embeded/bin/"* 2>/dev/null || true
-
     # Remove macOS quarantine/provenance attributes and re-sign binaries (Gatekeeper fix)
     if ! "$SCRIPT_DIR/python_embeded/bin/python3.11" -c "pass" 2>/dev/null; then
         echo "[Setup] Fixing macOS Gatekeeper restrictions..."
@@ -249,30 +246,6 @@ if [[ -f "$SCRIPT_DIR/python_embeded/bin/python3.11" ]]; then
         echo "[Environment] Using embedded Python."
         PYTHON_EXE="$SCRIPT_DIR/python_embeded/bin/python3.11"
         SCRIPT_PATH="$SCRIPT_DIR/acestep/acestep_v15_pipeline.py"
-
-        # Verify MLX metallib compatibility (python_embeded may ship a wheel
-        # built for a newer macOS than the host, causing a fatal Metal error).
-        if [[ "$ARCH" == "arm64" ]] && \
-           ! "$PYTHON_EXE" -c "import mlx.core" 2>/dev/null; then
-            echo "[Setup] MLX metallib incompatible with this macOS version."
-            _mlx_ver=""
-            for _di in "$SCRIPT_DIR/python_embeded/lib/python3.11/site-packages"/mlx-*.dist-info; do
-                _mlx_ver="$(basename "$_di" | sed 's/^mlx-//;s/\.dist-info$//')"
-                break
-            done
-            if [[ -n "$_mlx_ver" ]]; then
-                echo "[Setup] Reinstalling MLX ${_mlx_ver} for this macOS version..."
-                if "$PYTHON_EXE" -m pip install --force-reinstall --no-deps \
-                        "mlx==${_mlx_ver}" "mlx-metal==${_mlx_ver}" 2>&1 | \
-                        tail -1 | grep -q "Successfully"; then
-                    echo "[Setup] MLX fixed successfully."
-                else
-                    echo "[Setup] WARNING: MLX reinstall failed; LM will fall back to PyTorch."
-                fi
-            else
-                echo "[Setup] WARNING: Cannot determine MLX version; LM will fall back to PyTorch."
-            fi
-        fi
 
         echo "Starting ACE-Step Gradio UI..."
         echo

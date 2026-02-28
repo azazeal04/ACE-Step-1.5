@@ -17,8 +17,8 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from acestep.training.lora_utils import (
-    _unwrap_decoder,
+from acestep.training.lora_injection import _unwrap_decoder
+from acestep.training.lora_checkpoint import (
     load_training_checkpoint,
     save_lora_weights,
 )
@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Module introspection
 # ---------------------------------------------------------------------------
+
 
 def iter_module_wrappers(module: nn.Module) -> list:
     """Collect wrapper-chain modules (Fabric/PEFT/compile wrappers).
@@ -64,6 +65,7 @@ def iter_module_wrappers(module: nn.Module) -> list:
 # ---------------------------------------------------------------------------
 # Memory configuration
 # ---------------------------------------------------------------------------
+
 
 def configure_memory_features(decoder: nn.Module) -> tuple:
     """Enable gradient checkpointing, disable use_cache, and enable
@@ -121,8 +123,15 @@ def configure_memory_features(decoder: nn.Module) -> tuple:
 def offload_non_decoder(model: nn.Module) -> int:
     """Move encoder/VAE/non-decoder submodules to CPU. Returns count offloaded."""
     count = 0
-    for name in ("music_encoder", "lyric_encoder", "timbre_encoder",
-                  "condition_projection", "vae", "text_encoder", "attention_pooler"):
+    for name in (
+        "music_encoder",
+        "lyric_encoder",
+        "timbre_encoder",
+        "condition_projection",
+        "vae",
+        "text_encoder",
+        "attention_pooler",
+    ):
         sub = getattr(model, name, None)
         if sub is not None and isinstance(sub, nn.Module):
             sub.to("cpu")
@@ -193,8 +202,12 @@ def save_adapter_flat(trainer: Any, output_dir: str) -> None:
 
 
 def save_checkpoint(
-    trainer: Any, optimizer: Any, scheduler: Any,
-    epoch: int, global_step: int, ckpt_dir: str,
+    trainer: Any,
+    optimizer: Any,
+    scheduler: Any,
+    epoch: int,
+    global_step: int,
+    ckpt_dir: str,
 ) -> None:
     """Save a resumable checkpoint that is also inference-ready.
 
@@ -220,6 +233,7 @@ def save_checkpoint(
     # training progress metadata.
     try:
         from safetensors.torch import save_file as _save_safetensors
+
         meta_tensors = {
             "epoch": torch.tensor([epoch], dtype=torch.int64),
             "global_step": torch.tensor([global_step], dtype=torch.int64),
@@ -231,7 +245,9 @@ def save_checkpoint(
 
     logger.info(
         "Training checkpoint saved to %s (epoch %d, step %d)",
-        ckpt_dir, epoch, global_step,
+        ckpt_dir,
+        epoch,
+        global_step,
     )
 
 
@@ -290,9 +306,11 @@ def verify_saved_adapter(output_dir: str) -> None:
         else:
             pct = 100.0 * nonzero_params / max(total_params, 1)
             logger.info(
-                "[OK] Adapter verified: %s params, %s non-zero (%.1f%%), "
-                "max|w|=%.6f",
-                f"{total_params:,}", f"{nonzero_params:,}", pct, max_abs,
+                "[OK] Adapter verified: %s params, %s non-zero (%.1f%%), max|w|=%.6f",
+                f"{total_params:,}",
+                f"{nonzero_params:,}",
+                pct,
+                max_abs,
             )
 
         if not os.path.exists(config_path):
@@ -306,7 +324,10 @@ def verify_saved_adapter(output_dir: str) -> None:
 
 
 def resume_checkpoint(
-    trainer: Any, resume_path: str, optimizer: Any, scheduler: Any,
+    trainer: Any,
+    resume_path: str,
+    optimizer: Any,
+    scheduler: Any,
 ) -> Generator[TrainingUpdate, None, Optional[Tuple[int, int]]]:
     """Resume from a checkpoint directory. Returns (start_epoch, global_step) or None."""
     module = trainer.module
@@ -318,7 +339,8 @@ def resume_checkpoint(
     if ckpt_dir.is_file():
         logger.info(
             "resume_from points to a file (%s) -- using parent directory %s",
-            ckpt_dir.name, ckpt_dir.parent,
+            ckpt_dir.name,
+            ckpt_dir.parent,
         )
         ckpt_dir = ckpt_dir.parent
 
